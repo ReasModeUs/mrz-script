@@ -19,3 +19,10 @@
 
 ```bash
 curl -Ls https://raw.githubusercontent.com/ReasModeUs/mrz-script/main/mrz-ssl.sh -o mrz-ssl.sh && chmod +x mrz-ssl.sh && ./mrz-ssl.sh
+
+## 🛡️ Firewall Setup (Important)
+If you are using UFW (Ubuntu Firewall), you must allow ports 80 and 443:
+```bash
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw reload
