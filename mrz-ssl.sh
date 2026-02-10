@@ -41,50 +41,35 @@ log_err() {
 }
 
 install_dependencies() {
-    log_info "Checking dependencies..."
     if ! command -v socat &> /dev/null || ! command -v lsof &> /dev/null; then
+        echo -e "${CYAN}Installing dependencies...${NC}"
         apt-get update -qq && apt-get install -y socat lsof curl tar cron &> /dev/null
-        log_info "Dependencies installed."
     fi
 
     if [[ ! -f "$ACME_SCRIPT" ]]; then
-        log_info "Installing acme.sh..."
+        echo -e "${CYAN}Installing acme.sh submodule...${NC}"
         curl -s https://get.acme.sh | sh &> /dev/null
     fi
 }
 
 check_port_80() {
-    log_info "Checking Port 80 availability..."
     local conflict_pid
     conflict_pid=$(lsof -t -i:80 -sTCP:LISTEN)
 
     if [[ -n "$conflict_pid" ]]; then
         local process_name
         process_name=$(ps -p "$conflict_pid" -o comm=)
-        log_warn "Port 80 is currently held by process: $process_name (PID: $conflict_pid)"
+        log_warn "Port 80 is used by: $process_name (PID: $conflict_pid). Stopping it momentarily..."
         
-        # Try graceful stop for common servers
         if systemctl is-active --quiet nginx; then
             systemctl stop nginx
-            log_info "Stopped Nginx service."
         elif systemctl is-active --quiet apache2; then
             systemctl stop apache2
-            log_info "Stopped Apache2 service."
         else
-            log_warn "Force killing process $conflict_pid..."
             kill -9 "$conflict_pid"
         fi
-        
-        # Double check
         sleep 2
-        if lsof -t -i:80 -sTCP:LISTEN &> /dev/null; then
-            log_err "Failed to free Port 80. Please check logs manually."
-            return 1
-        fi
-    else
-        log_info "Port 80 is free."
     fi
-    return 0
 }
 
 deploy_marzban() {
@@ -95,11 +80,12 @@ deploy_marzban() {
     mkdir -p "$target"
     cp "$cert" "$target/fullchain.pem"
     cp "$key" "$target/key.pem"
-    log_info "Certificates deployed to $target"
     
     if command -v docker &> /dev/null; then
-        log_info "Restarting Marzban container..."
-        docker restart marzban &> /dev/null || log_warn "Marzban container not found/running."
+        docker restart marzban &> /dev/null
+        log_info "Certificate installed & Marzban restarted."
+    else
+        log_warn "Certificate copied, but Marzban docker not found."
     fi
 }
 
@@ -114,117 +100,120 @@ deploy_generic() {
     chmod 644 "$target/public.crt"
     chmod 644 "$target/private.key"
     
-    echo -e "\n${CYAN}==============================================${NC}"
-    echo -e " Certificates saved successfully!"
-    echo -e " Public Cert : ${YELLOW}$target/public.crt${NC}"
-    echo -e " Private Key : ${YELLOW}$target/private.key${NC}"
-    echo -e "${CYAN}==============================================${NC}\n"
-    log_info "Certificates saved to $target"
+    echo -e "\n${CYAN}>>> SUCCESS! DETAILS BELOW:${NC}"
+    echo -e "Public Cert : ${YELLOW}$target/public.crt${NC}"
+    echo -e "Private Key : ${YELLOW}$target/private.key${NC}"
+    echo -e "${CYAN}Copy these paths to your panel settings.${NC}\n"
 }
 
 issue_cert() {
     local domain=$1
     local panel=$2
 
-    check_port_80 || exit 1
+    check_port_80
     
-    log_info "Issuing certificate for $domain using ZeroSSL..."
+    echo -e "${CYAN}Requesting certificate for $domain...${NC}"
     "$ACME_SCRIPT" --register-account -m "admin@$domain" --server zerossl &> /dev/null
     
     if "$ACME_SCRIPT" --issue -d "$domain" --standalone --force; then
-        log_info "Certificate issued successfully."
-        
         local cert_path="$HOME/.acme.sh/${domain}_ecc/fullchain.cer"
         local key_path="$HOME/.acme.sh/${domain}_ecc/${domain}.key"
         
-        case $panel in
-            1) deploy_marzban "$cert_path" "$key_path" ;;
-            *) deploy_generic "$cert_path" "$key_path" ;;
-        esac
+        if [[ "$panel" == "1" ]]; then
+            deploy_marzban "$cert_path" "$key_path"
+        else
+            deploy_generic "$cert_path" "$key_path"
+        fi
         
-        # Restart webserver if it was present
-        systemctl start nginx 2>/dev/null && log_info "Nginx restarted."
-        
+        systemctl start nginx 2>/dev/null
     else
-        log_err "Failed to issue certificate. Check network or Cloudflare settings."
-        exit 1
+        log_err "Certificate generation failed. Check Port 80 or DNS."
+        systemctl start nginx 2>/dev/null
+    fi
+}
+
+uninstall_script() {
+    read -p "Are you sure you want to remove MRZ-SSL? (y/n): " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        rm -f "$SCRIPT_PATH"
+        echo -e "${GREEN}Script uninstalled successfully.${NC}"
+        exit 0
+    else
+        echo "Cancelled."
     fi
 }
 
 show_menu() {
     clear
     echo -e "${CYAN}==============================================${NC}"
-    echo -e " MRZ SSL Manager - v1.0"
-    echo -e " ${YELLOW}https://github.com/ReasModeUs${NC}"
+    echo -e "      MRZ SSL Manager  |  v2.0"
     echo -e "${CYAN}==============================================${NC}"
-    echo "1. Request New Certificate"
-    echo "2. Renew All Certificates"
-    echo "3. Delete/Revoke Certificate"
-    echo "4. View Logs"
-    echo "5. Exit"
+    echo -e "${GREEN}1)${NC} Get New Certificate"
+    echo -e "${GREEN}2)${NC} View Logs"
+    echo -e "${GREEN}3)${NC} Renew All Certificates"
+    echo -e "${GREEN}4)${NC} Delete a Certificate"
+    echo -e "${RED}5) Uninstall Script${NC}"
+    echo -e "${YELLOW}0) Exit${NC}"
     echo -e "${CYAN}==============================================${NC}"
-    read -rp "Select option: " opt
+    read -rp "Select Option: " opt
 
     case $opt in
         1)
             read -rp "Enter Domain: " domain
-            [[ -z "$domain" ]] && echo "Domain required." && exit 1
-            echo "Select Panel:"
-            echo "1) Marzban (Auto-Install)"
-            echo "2) Sanaei / PasarGuard"
-            echo "3) Other (File Only)"
-            read -rp "Choice [1-3]: " p_choice
+            echo -e "\nWhich Panel?"
+            echo "1) Marzban (Auto Install)"
+            echo "2) Sanaei / PasarGuard / Other"
+            read -rp "Select [1-2]: " p_choice
             issue_cert "$domain" "$p_choice"
             ;;
         2)
-            "$ACME_SCRIPT" --cron --force
-            log_info "Renewal process completed."
+            echo -e "${CYAN}--- Last 20 Logs ---${NC}"
+            tail -n 20 "$LOG_FILE"
+            echo -e "${CYAN}--------------------${NC}"
+            read -p "Press Enter to continue..."
+            show_menu
             ;;
         3)
-            read -rp "Enter Domain to remove: " domain
-            "$ACME_SCRIPT" --remove -d "$domain"
-            rm -rf "$HOME/.acme.sh/${domain}_ecc"
-            log_info "Certificate for $domain removed."
+            "$ACME_SCRIPT" --cron --force
+            read -p "Renewal done. Press Enter..."
+            show_menu
             ;;
         4)
-            cat "$LOG_FILE"
+            read -rp "Enter Domain to remove: " domain
+            "$ACME_SCRIPT" --remove -d "$domain" &>/dev/null
+            rm -rf "$HOME/.acme.sh/${domain}_ecc"
+            echo "Deleted."
+            sleep 1
+            show_menu
             ;;
         5)
+            uninstall_script
+            ;;
+        0)
+            echo "Bye!"
             exit 0
             ;;
         *)
-            echo "Invalid option."
+            show_menu
             ;;
     esac
 }
 
-# --- Main Installation / Execution Logic ---
+# --- Install & Run ---
 
-# Self-Install logic
 if [[ ! -f "$SCRIPT_PATH" ]] || [[ "$(realpath "$0")" != "$SCRIPT_PATH" ]]; then
     cp "$0" "$SCRIPT_PATH"
     chmod +x "$SCRIPT_PATH"
-    echo -e "${GREEN}Installed 'mrz-ssl' to system.${NC}"
 fi
 
 install_dependencies
 
-# Argument Handling
 if [[ $# -gt 0 ]]; then
     case $1 in
-        new)
-            [[ -z $2 ]] && echo "Usage: mrz-ssl new <domain>" && exit 1
-            issue_cert "$2" "3" 
-            ;;
-        renew)
-            "$ACME_SCRIPT" --cron --force
-            ;;
-        logs)
-            tail -n 50 "$LOG_FILE"
-            ;;
-        *)
-            echo "Usage: mrz-ssl [new|renew|logs]"
-            ;;
+        new) issue_cert "$2" "2" ;;
+        logs) tail -n 50 "$LOG_FILE" ;;
+        uninstall) uninstall_script ;;
+        *) show_menu ;;
     esac
 else
     show_menu
