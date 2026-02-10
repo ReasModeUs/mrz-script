@@ -28,7 +28,7 @@ mxp
 ✅ Smart Port Release: Automatically detects and stops conflicting services on ports 80/443.
 ✅ Maintenance: Easy Update and Uninstall from the menu.
 
-# 📖 How to use
+## 📖 How to use
 Run mxp.
 Select Option 1.
 Enter your domain and email.
