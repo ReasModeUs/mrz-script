@@ -2,7 +2,7 @@
 
 # ==========================================================
 # MXP SSL Manager (Marzban - X-UI - PasarGuard)
-# Version: 1.0.2
+# Version: 1.0.3
 # Copyright (c) 2026 ReasModeUs
 # GitHub: https://github.com/ReasModeUs
 # ==========================================================
@@ -83,12 +83,11 @@ issue_cert() {
         done
     elif [[ "$mode" == "multi" ]]; then
         echo -e "${CYAN}--- Multi-Domain (SAN) Mode ---${NC}"
-        echo -e "${YELLOW}Instruction:${NC} Separate domains with a comma (,)."
-        echo -e "Example: ${GREEN}panel.site.com,config.site.com,sub.site.com${NC}"
+        echo -e "${YELLOW}Note:${NC} You will get ONE file valid for ALL domains."
+        echo -e "Example: ${GREEN}sub1.site.com,sub2.site.com${NC}"
         echo ""
         while [[ -z "$domain_list" ]]; do
             read -rp "Enter Domains: " domain_list
-            # Remove spaces just in case user typed "dom1, dom2"
             domain_list=$(echo "$domain_list" | tr -d ' ')
             [[ -z "$domain_list" ]] && echo -e "${RED}Domains cannot be empty.${NC}"
         done
@@ -105,7 +104,7 @@ issue_cert() {
     done
 
     # --- PANEL SELECTION ---
-    echo -e "\nChoose Your Panel:\n1) Marzban (M)\n2) PasarGuard (P)\n3) X-UI / Sanaei (X)"
+    echo -e "\nChoose Your Panel Automation:\n1) Marzban (M)\n2) PasarGuard (P)\n3) None (Just Save Files)"
     read -rp "Choice: " p_choice
 
     echo -e "\nChoose Method:\n1) Port 80 (Standard)\n2) Port 443 (ALPN)"
@@ -124,7 +123,7 @@ issue_cert() {
 
     local mode_flag=$([[ "$m_choice" == "1" ]] && echo "--standalone" || echo "--alpn")
 
-    # Build ACME arguments for multi-domain
+    # Build ACME arguments
     local acme_domain_args=""
     IFS=',' read -ra DOMAINS <<< "$domain_list"
     local main_domain="${DOMAINS[0]}"
@@ -139,16 +138,22 @@ issue_cert() {
         local cp="$HOME/.acme.sh/${main_domain}_ecc/fullchain.cer"
         local kp="$HOME/.acme.sh/${main_domain}_ecc/${main_domain}.key"
         
+        # 1. Automate Panel
         case $p_choice in
             1) deploy_marzban "$main_domain" "$cp" "$kp" ;;
             2) deploy_pasarguard "$cp" "$kp" ;;
-            *) 
-                mkdir -p "/root/certs/$main_domain"
-                cp "$cp" "/root/certs/$main_domain/public.crt"
-                cp "$kp" "/root/certs/$main_domain/private.key"
-                echo -e "${GREEN}Certs saved in /root/certs/$main_domain/${NC}"
-                ;;
         esac
+
+        # 2. Save Copy for EVERY domain provided (So user finds them easily)
+        echo -e "\n${CYAN}--- Saving Certificates ---${NC}"
+        for d in "${DOMAINS[@]}"; do
+            mkdir -p "/root/certs/$d"
+            cp "$cp" "/root/certs/$d/public.crt"
+            cp "$kp" "/root/certs/$d/private.key"
+            echo -e "${GREEN}Mapped: $d -> /root/certs/$d/${NC}"
+        done
+        echo -e "${YELLOW}(Note: The file content is the same for all, as it includes all domains)${NC}"
+
     else
         log_err "SSL issuance failed. Check DNS or Firewall."
     fi
@@ -165,7 +170,7 @@ revoke_cert() {
     
     local domain=""
     while [[ -z "$domain" ]]; do
-        read -rp "Enter Domain to Revoke: " domain
+        read -rp "Enter Main Domain to Revoke: " domain
         [[ -z "$domain" ]] && echo -e "${RED}Please enter a domain.${NC}"
     done
 
@@ -173,9 +178,10 @@ revoke_cert() {
     if [[ "$confirm" == "y" ]]; then
         "$ACME_SCRIPT" --revoke -d "$domain" --ecc
         "$ACME_SCRIPT" --remove -d "$domain" --ecc
-        rm -rf "/root/certs/$domain"
+        # Try to remove folder, user might have multiple folders now
+        rm -rf "/root/certs/$domain"*
         rm -rf "$HOME/.acme.sh/${domain}_ecc"
-        log_info "Revoked: $domain"
+        log_info "Revoked and deleted: $domain"
     else
         echo "Cancelled."
     fi
@@ -187,7 +193,7 @@ update_script() {
     if [[ -f "$SCRIPT_PATH.tmp" ]]; then
         mv "$SCRIPT_PATH.tmp" "$SCRIPT_PATH"
         chmod +x "$SCRIPT_PATH"
-        log_info "Updated to v1.0.3. Restart script."
+        log_info "Updated to v1.0.4. Restart script."
         exit 0
     else
         log_err "Update failed."
@@ -206,11 +212,11 @@ uninstall_script() {
 show_menu() {
     clear
     echo -e "${CYAN}==============================================${NC}"
-    echo -e "      MXP SSL Manager  |  v1.0.3"
+    echo -e "      MXP SSL Manager  |  v1.0.4"
     echo -e "      [M]arzban - [X]-UI - [P]asarGuard"
     echo -e "${CYAN}==============================================${NC}"
     echo "1) Single Domain SSL (e.g. site.com)"
-    echo "2) Multi-Domain SSL (e.g. sub1.com,sub2.com)"
+    echo "2) Multi-Domain SSL (One cert for all domains)"
     echo "3) Revoke & Delete Certificate"
     echo "4) List All Certificates"
     echo "5) Renew All Certificates"
