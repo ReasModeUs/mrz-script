@@ -41,7 +41,6 @@ deploy_marzban() {
         sed -i '/UVICORN_SSL_KEYFILE/d' "$env_file"
         printf "\nUVICORN_SSL_CERTFILE=\"/var/lib/marzban/certs/fullchain.pem\"\nUVICORN_SSL_KEYFILE=\"/var/lib/marzban/certs/key.pem\"\n" >> "$env_file"
         
-        # Check if docker or normal install
         cd "$(dirname "$env_file")" 
         docker compose up -d 2>/dev/null || marzban restart 2>/dev/null
         log_info "Marzban certs deployed and service restarted."
@@ -50,73 +49,82 @@ deploy_marzban() {
 
 deploy_pasarguard() {
     local cert=$1; local key=$2
-    # Standard location for PasarGuard
     local PG_DIR="/var/lib/pasarguard/certs"
     local PG_BACKUP="/root/pasarguard_certs"
     
     mkdir -p "$PG_DIR" "$PG_BACKUP"
-    
-    # Copy to service directory
     cp "$cert" "$PG_DIR/fullchain.pem"
     cp "$key" "$PG_DIR/key.pem"
-    
-    # Copy to backup just in case
     cp "$cert" "$PG_BACKUP/fullchain.pem"
     cp "$key" "$PG_BACKUP/key.pem"
 
-    # Try restart
     if systemctl is-active --quiet pasarguard; then
         systemctl restart pasarguard
         log_info "PasarGuard service restarted."
     else
-        log_info "Certs saved to: $PG_DIR (Please map this volume if using Docker)"
+        log_info "Certs saved to: $PG_DIR"
     fi
-    echo -e "${YELLOW}Backup certs also saved in: $PG_BACKUP${NC}"
 }
 
 # --- Core Functions ---
 
 issue_cert() {
+    local mode=$1  # 'single' or 'multi'
     clear
     local domain_list=""
     local email=""
-    
-    # Input Validation: Domain
-    while [[ -z "$domain_list" ]]; do
-        read -rp "Enter Domain(s) (separate with comma for multi-domain): " domain_list
-        [[ -z "$domain_list" ]] && echo -e "${RED}Domain cannot be empty.${NC}"
-    done
 
-    # Input Validation: Email
+    # --- INPUT SECTION ---
+    if [[ "$mode" == "single" ]]; then
+        echo -e "${CYAN}--- Single Domain Mode ---${NC}"
+        while [[ -z "$domain_list" ]]; do
+            read -rp "Enter Domain (e.g., panel.site.com): " domain_list
+            [[ -z "$domain_list" ]] && echo -e "${RED}Domain cannot be empty.${NC}"
+        done
+    elif [[ "$mode" == "multi" ]]; then
+        echo -e "${CYAN}--- Multi-Domain (SAN) Mode ---${NC}"
+        echo -e "${YELLOW}Instruction:${NC} Separate domains with a comma (,)."
+        echo -e "Example: ${GREEN}panel.site.com,config.site.com,sub.site.com${NC}"
+        echo ""
+        while [[ -z "$domain_list" ]]; do
+            read -rp "Enter Domains: " domain_list
+            # Remove spaces just in case user typed "dom1, dom2"
+            domain_list=$(echo "$domain_list" | tr -d ' ')
+            [[ -z "$domain_list" ]] && echo -e "${RED}Domains cannot be empty.${NC}"
+        done
+    fi
+
+    # --- EMAIL SECTION ---
     while [[ -z "$email" ]]; do
         read -rp "Enter Email: " email
         if [[ -z "$email" ]]; then 
-            # Auto-generate email based on first domain
             local first_dom=$(echo "$domain_list" | cut -d',' -f1)
             email="admin@$first_dom"
             echo -e "${YELLOW}Using default email: $email${NC}"
         fi
     done
 
+    # --- PANEL SELECTION ---
     echo -e "\nChoose Your Panel:\n1) Marzban (M)\n2) PasarGuard (P)\n3) X-UI / Sanaei (X)"
     read -rp "Choice: " p_choice
 
     echo -e "\nChoose Method:\n1) Port 80 (Standard)\n2) Port 443 (ALPN)"
     read -rp "Choice: " m_choice
 
+    # --- EXECUTION ---
     "$ACME_SCRIPT" --set-default-ca --server letsencrypt &> /dev/null
     "$ACME_SCRIPT" --register-account -m "$email" &> /dev/null
 
     local port=$([[ "$m_choice" == "1" ]] && echo "80" || echo "443")
     
-    # Free up ports
+    # Stop conflicting services
     systemctl stop nginx x-ui 3x-ui marzban pasarguard 2>/dev/null
     fuser -k "$port/tcp" 2>/dev/null
     sleep 1
 
     local mode_flag=$([[ "$m_choice" == "1" ]] && echo "--standalone" || echo "--alpn")
 
-    # Handle Multi-Domain (SAN)
+    # Build ACME arguments for multi-domain
     local acme_domain_args=""
     IFS=',' read -ra DOMAINS <<< "$domain_list"
     local main_domain="${DOMAINS[0]}"
@@ -127,7 +135,6 @@ issue_cert() {
 
     log_info "Issuing certificate for: $domain_list ..."
     
-    # Run ACME
     if "$ACME_SCRIPT" --issue $acme_domain_args "$mode_flag" --force; then
         local cp="$HOME/.acme.sh/${main_domain}_ecc/fullchain.cer"
         local kp="$HOME/.acme.sh/${main_domain}_ecc/${main_domain}.key"
@@ -143,7 +150,7 @@ issue_cert() {
                 ;;
         esac
     else
-        log_err "SSL issuance failed. Check DNS A records or Firewall."
+        log_err "SSL issuance failed. Check DNS or Firewall."
     fi
     
     # Restart services
@@ -162,25 +169,25 @@ revoke_cert() {
         [[ -z "$domain" ]] && echo -e "${RED}Please enter a domain.${NC}"
     done
 
-    read -rp "Are you sure you want to delete SSL for $domain? (y/n): " confirm
+    read -rp "Confirm Delete? (y/n): " confirm
     if [[ "$confirm" == "y" ]]; then
         "$ACME_SCRIPT" --revoke -d "$domain" --ecc
         "$ACME_SCRIPT" --remove -d "$domain" --ecc
         rm -rf "/root/certs/$domain"
         rm -rf "$HOME/.acme.sh/${domain}_ecc"
-        log_info "Certificate for $domain revoked and deleted."
+        log_info "Revoked: $domain"
     else
-        echo "Operation cancelled."
+        echo "Cancelled."
     fi
 }
 
 update_script() {
-    log_info "Checking for updates..."
+    log_info "Updating..."
     curl -Ls "$GITHUB_RAW" -o "$SCRIPT_PATH.tmp"
     if [[ -f "$SCRIPT_PATH.tmp" ]]; then
         mv "$SCRIPT_PATH.tmp" "$SCRIPT_PATH"
         chmod +x "$SCRIPT_PATH"
-        log_info "Updated to v1.0.2. Please restart script."
+        log_info "Updated to v1.0.3. Restart script."
         exit 0
     else
         log_err "Update failed."
@@ -191,7 +198,7 @@ uninstall_script() {
     read -rp "Uninstall MXP-SSL? (y/n): " confirm
     if [[ "$confirm" == "y" ]]; then
         rm -f "$SCRIPT_PATH"
-        echo -e "${GREEN}MXP-SSL removed.${NC}"
+        echo -e "${GREEN}Removed.${NC}"
         exit 0
     fi
 }
@@ -199,25 +206,27 @@ uninstall_script() {
 show_menu() {
     clear
     echo -e "${CYAN}==============================================${NC}"
-    echo -e "      MXP SSL Manager  |  v1.0.2"
+    echo -e "      MXP SSL Manager  |  v1.0.3"
     echo -e "      [M]arzban - [X]-UI - [P]asarGuard"
     echo -e "${CYAN}==============================================${NC}"
-    echo "1) Request New Certificate (Multi-Domain Supported)"
-    echo "2) Revoke/Delete Certificate"
-    echo "3) List All Certificates"
-    echo "4) Renew All Certificates"
-    echo "5) Update Script"
-    echo "6) Uninstall Script"
+    echo "1) Single Domain SSL (e.g. site.com)"
+    echo "2) Multi-Domain SSL (e.g. sub1.com,sub2.com)"
+    echo "3) Revoke & Delete Certificate"
+    echo "4) List All Certificates"
+    echo "5) Renew All Certificates"
+    echo "6) Update Script"
+    echo "7) Uninstall"
     echo "0) Exit"
     echo -e "${CYAN}==============================================${NC}"
-    read -rp "Select Option: " opt
+    read -rp "Option: " opt
     case $opt in
-        1) issue_cert ;;
-        2) revoke_cert; read -p "Press Enter..."; show_menu ;;
-        3) "$ACME_SCRIPT" --list; read -p "Press Enter..."; show_menu ;;
-        4) "$ACME_SCRIPT" --cron --force; read -p "Done. Press Enter..."; show_menu ;;
-        5) update_script ;;
-        6) uninstall_script ;;
+        1) issue_cert "single" ;;
+        2) issue_cert "multi" ;;
+        3) revoke_cert; read -p "Press Enter..."; show_menu ;;
+        4) "$ACME_SCRIPT" --list; read -p "Press Enter..."; show_menu ;;
+        5) "$ACME_SCRIPT" --cron --force; read -p "Done..."; show_menu ;;
+        6) update_script ;;
+        7) uninstall_script ;;
         0) exit 0 ;;
         *) show_menu ;;
     esac
